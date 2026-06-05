@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>내 공인 IP 확인 (GitHub IP Allow List 용)</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --card: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #2f81f7;
+      --ok: #3fb950;
+      --err: #f85149;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      min-height: 100vh;
+      padding: 32px 16px;
+    }
+    .container { width: 100%; max-width: 640px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .sub { color: var(--muted); font-size: 13px; margin: 0 0 24px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+    .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+    .ip {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 28px;
+      font-weight: 600;
+      word-break: break-all;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .ip.loading { color: var(--muted); font-size: 16px; font-weight: 400; }
+    .ip.error { color: var(--err); font-size: 15px; font-weight: 400; }
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    button:hover { opacity: 0.9; }
+    button.copied { background: var(--ok); }
+    .meta { margin-top: 16px; display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; font-size: 13px; }
+    .meta .k { color: var(--muted); }
+    .meta .v { font-family: "SFMono-Regular", Consolas, monospace; word-break: break-all; }
+    .note {
+      background: #1c2128;
+      border-left: 3px solid var(--accent);
+      padding: 12px 16px;
+      border-radius: 0 8px 8px 0;
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .note code { color: var(--text); background: #30363d55; padding: 1px 5px; border-radius: 4px; }
+    .refresh { margin-bottom: 20px; }
+    .refresh button { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>내 공인 IP 확인</h1>
+    <p class="sub">GitHub IP allow list에 등록할 "외부에서 보이는 출발 IP"를 확인하는 용도입니다.</p>
+
+    <div class="refresh">
+      <button id="refreshBtn" onclick="loadAll()">↻ 다시 조회</button>
+    </div>
+
+    <div class="card">
+      <div class="label">IPv4</div>
+      <div class="ip loading" id="ipv4">조회 중…</div>
+    </div>
+
+    <div class="card">
+      <div class="label">IPv6 (있는 경우)</div>
+      <div class="ip loading" id="ipv6">조회 중…</div>
+    </div>
+
+    <div class="card">
+      <div class="label">상세 정보</div>
+      <div class="meta" id="meta">
+        <div class="k">조회 중…</div><div class="v"></div>
+      </div>
+    </div>
+
+    <div class="note">
+      이 페이지는 브라우저에서 직접 외부 IP 조회 API
+      (<code>api.ipify.org</code>, <code>ipwho.is</code>)를 호출해 결과를 표시합니다.
+      서버 없이 동작하며, 입력 데이터를 어디에도 저장하지 않습니다.<br />
+      여기 표시되는 IPv4가 회사 인터넷 회선의 고정 공인 IP라면, 해당 값을
+      <code>x.x.x.x/32</code> 또는 대역 <code>x.x.x.0/24</code> 형태로 GitHub allow list에 등록하면 됩니다.<br />
+      ⚠️ Jenkins 서버에서 이 페이지(또는 <code>curl https://api.ipify.org</code>)를 실행해
+      <b>자동화가 나가는 공인 IP</b>도 반드시 함께 확인하세요.
+    </div>
+  </div>
+
+  <script>
+    // CORS 지원 HTTPS 엔드포인트 (순서대로 시도)
+    const IPV4_ENDPOINTS = [
+      "https://api.ipify.org?format=json",
+      "https://ipv4.icanhazip.com",     // 평문 반환
+    ];
+    const IPV6_ENDPOINT = "https://api64.ipify.org?format=json";
+    const DETAIL_ENDPOINT = "https://ipwho.is/";
+
+    async function fetchText(url) {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const ct = res.headers.get("content-type") || "";
+      if (ct.includes("application/json")) {
+        const j = await res.json();
+        return j.ip || j.address || JSON.stringify(j);
+      }
+      return (await res.text()).trim();
+    }
+
+    function setIp(elId, value, isError) {
+      const el = document.getElementById(elId);
+      el.classList.remove("loading", "error");
+      if (isError) {
+        el.classList.add("error");
+        el.textContent = value;
+        return;
+      }
+      el.textContent = "";
+      const span = document.createElement("span");
+      span.textContent = value;
+      const btn = document.createElement("button");
+      btn.textContent = "복사";
+      btn.onclick = () => {
+        navigator.clipboard.writeText(value).then(() => {
+          btn.textContent = "복사됨 ✓";
+          btn.classList.add("copied");
+          setTimeout(() => { btn.textContent = "복사"; btn.classList.remove("copied"); }, 1500);
+        });
+      };
+      el.appendChild(span);
+      el.appendChild(btn);
+    }
+
+    async function loadIPv4() {
+      for (const url of IPV4_ENDPOINTS) {
+        try {
+          const ip = await fetchText(url);
+          if (ip) { setIp("ipv4", ip, false); return; }
+        } catch (e) { /* 다음 엔드포인트 시도 */ }
+      }
+      setIp("ipv4", "조회 실패 (네트워크/방화벽 차단 가능)", true);
+    }
+
+    async function loadIPv6() {
+      try {
+        const ip = await fetchText(IPV6_ENDPOINT);
+        // ipify64는 IPv6가 없으면 IPv4를 반환하므로 ':' 포함 여부로 구분
+        if (ip && ip.includes(":")) {
+          setIp("ipv6", ip, false);
+        } else {
+          setIp("ipv6", "IPv6 없음 (IPv4 전용 환경)", true);
+        }
+      } catch (e) {
+        setIp("ipv6", "조회 실패", true);
+      }
+    }
+
+    async function loadDetail() {
+      const meta = document.getElementById("meta");
+      try {
+        const res = await fetch(DETAIL_ENDPOINT, { cache: "no-store" });
+        const d = await res.json();
+        const rows = [
+          ["IP", d.ip],
+          ["국가", (d.country || "-") + " (" + (d.country_code || "-") + ")"],
+          ["지역/도시", [d.region, d.city].filter(Boolean).join(" / ") || "-"],
+          ["ISP", d.connection?.isp || d.isp || "-"],
+          ["조직(Org)", d.connection?.org || d.org || "-"],
+          ["ASN", d.connection?.asn ? ("AS" + d.connection.asn) : "-"],
+        ];
+        meta.innerHTML = "";
+        for (const [k, v] of rows) {
+          const kd = document.createElement("div"); kd.className = "k"; kd.textContent = k;
+          const vd = document.createElement("div"); vd.className = "v"; vd.textContent = v ?? "-";
+          meta.appendChild(kd); meta.appendChild(vd);
+        }
+      } catch (e) {
+        meta.innerHTML = '<div class="k">상세 정보</div><div class="v">조회 실패</div>';
+      }
+    }
+
+    function loadAll() {
+      setIp("ipv4", "조회 중…", false);
+      document.getElementById("ipv4").classList.add("loading");
+      document.getElementById("ipv6").classList.add("loading");
+      document.getElementById("ipv6").textContent = "조회 중…";
+      loadIPv4();
+      loadIPv6();
+      loadDetail();
+    }
+
+    loadAll();
+  </script>
+</body>
+</html>
